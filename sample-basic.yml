@@ -1,0 +1,74 @@
+--- Emblica Pipelines Definition
+
+resources:
+  - name: terraform-state
+    module: file-from-s3
+    path: s3://terraform-state/state.tfstate
+    
+  - name: terraform
+    module: terraform-output
+    state: terraform-state.contents
+
+
+phases:
+  - phase: Checkout
+    nodes:
+    - title: "GitHub Push"
+      module: github
+      name: github
+      mode: trigger
+      repository: https://github.com/emblica/halti-server
+      credentials: pipes-vault
+
+
+  - phase: Build and analysis
+    nodes:
+    - title: "CircleCI tests"
+      module: circleci
+      name: circleci
+      triggered: github.push
+      repository: "https://github.com/example/server"
+      
+    - title: "Static analysis"
+      module: container-shell
+      name: staticanalysis
+      triggered: github.push
+      image: dockerhub/staticanalysis
+      command: "analyze -i /src/"
+      
+    - title: "Docker build"
+      module: docker-build
+      name: build
+      triggered: github.push
+      image: example/halti-server
+      version: github.push.head
+      
+    - title: "Push to registry"
+      module: docker-push
+      name: push-to-ecr
+      triggered: build
+      image: build.image
+      registry: terraform.ecr_url
+
+  - phase: Chatops Approval
+    nodes:
+    - title: Deploy?
+      name: approve-deploy
+      module: slack-approve
+      message: "Version {{github.push.head}} build @ {{timestamp}}. See report {{circleci.url}}"
+      channel: "#chatops"
+
+  - phase: Deploy
+    nodes:
+    - title: Terraform deploy
+      name: deploy
+      module: terraform-apply
+      triggered: approve-deploy.approve
+      state: terraform-state.contents
+      environment: { ecr_image: "push-to-ecr.image" }
+      
+    - title: Terraform state sync
+      module: file-to-s3
+      path: s3://terraform-state/state.tfstate
+      content: deploy.terraform-state
+      triggered: deploy.success
